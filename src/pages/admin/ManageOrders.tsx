@@ -32,24 +32,17 @@ const ManageOrders: React.FC = () => {
             .from('users')
             .select('name, email')
             .eq('id', order.user_id)
-            .maybeSingle();
+            .single();
 
           if (userError) {
             console.error('Error fetching user data:', userError);
             return { ...order, user: null };
           }
 
-          // Fetch order items with product details in a single query
+          // Fetch order items
           const { data: items, error: itemsError } = await supabase
             .from('order_items')
-            .select(`
-              id,
-              quantity,
-              size,
-              color,
-              price,
-              product_id
-            `)
+            .select('id, quantity, size, color, price, product_id')
             .eq('order_id', order.id);
 
           if (itemsError) {
@@ -57,8 +50,10 @@ const ManageOrders: React.FC = () => {
             return { ...order, user, items: [] };
           }
 
-          // Fetch all products for these items in a single query
-          const productIds = items.map(item => item.product_id);
+          // Get all unique product IDs
+          const productIds = [...new Set(items.map(item => item.product_id))];
+
+          // Fetch all products in a single query
           const { data: products, error: productsError } = await supabase
             .from('products')
             .select('id, name, price, image_url')
@@ -66,15 +61,19 @@ const ManageOrders: React.FC = () => {
 
           if (productsError) {
             console.error('Error fetching products:', productsError);
-            return { ...order, user, items: items.map(item => ({
-              ...item,
-              product: {
-                id: item.product_id,
-                name: 'Unknown Product',
-                price: item.price,
-                imageUrl: '',
-              }
-            })) };
+            return {
+              ...order,
+              user,
+              items: items.map(item => ({
+                ...item,
+                product: {
+                  id: item.product_id,
+                  name: 'Unknown Product',
+                  price: item.price,
+                  imageUrl: '',
+                },
+              })),
+            };
           }
 
           // Map products to items
@@ -83,7 +82,7 @@ const ManageOrders: React.FC = () => {
             return {
               ...item,
               product: product ? {
-                id: item.product_id,
+                id: product.id,
                 name: product.name,
                 price: product.price,
                 imageUrl: product.image_url,
@@ -92,7 +91,7 @@ const ManageOrders: React.FC = () => {
                 name: 'Unknown Product',
                 price: item.price,
                 imageUrl: '',
-              }
+              },
             };
           });
 
@@ -169,7 +168,7 @@ const ManageOrders: React.FC = () => {
   const handleStatusChange = async (orderId: string, newStatus: string) => {
     setUpdating(orderId);
     try {
-      // Update order status in database first
+      // First update the order status
       const { error: updateError } = await supabase
         .from('orders')
         .update({ status: newStatus })
@@ -177,60 +176,28 @@ const ManageOrders: React.FC = () => {
 
       if (updateError) throw updateError;
 
-      // After successful update, fetch user email and order details for email notification
-      const { data: userData, error: userError } = await supabase
-        .from('users')
-        .select('email, name')
-        .eq('id', (orders.find(o => o.id === orderId))?.user_id)
-        .maybeSingle();
+      // Get the order details
+      const order = orders.find(o => o.id === orderId);
+      if (!order || !order.user?.email) {
+        throw new Error('Order or user email not found');
+      }
 
-      if (!userError && userData?.email) {
-        // Fetch order details for the email
-        const { data: orderData } = await supabase
-          .from('orders')
-          .select('id, total, shipping_address')
-          .eq('id', orderId)
-          .single();
-
-        // Fetch order items and products separately to avoid join issues
-        const { data: itemsData } = await supabase
-          .from('order_items')
-          .select('id, quantity, size, color, price, product_id')
-          .eq('order_id', orderId);
-
-        if (itemsData) {
-          const productIds = itemsData.map(item => item.product_id);
-          const { data: productsData } = await supabase
-            .from('products')
-            .select('id, name, price, image_url')
-            .in('id', productIds);
-
-          // Combine items with their product data
-          const itemsWithProducts = itemsData.map(item => {
-            const product = productsData?.find(p => p.id === item.product_id);
-            return {
-              ...item,
-              product: product || {
-                name: 'Unknown Product',
-                price: item.price,
-                image_url: ''
-              }
-            };
-          });
-
-          // Send email notification
-          await supabase.functions.invoke('send-order-email', {
-            body: {
-              email: userData.email,
-              orderNumber: orderId.slice(0, 8),
-              status: newStatus,
-              items: itemsWithProducts,
-              total: orderData?.total,
-              shippingAddress: orderData?.shipping_address,
-              customerName: userData.name
-            },
-          });
-        }
+      // Send email notification
+      try {
+        await supabase.functions.invoke('send-order-email', {
+          body: {
+            email: order.user.email,
+            orderNumber: order.id.slice(0, 8),
+            status: newStatus,
+            items: order.items,
+            total: order.total,
+            shippingAddress: order.shippingAddress,
+            customerName: order.user.name
+          }
+        });
+      } catch (emailError) {
+        console.error('Error sending email notification:', emailError);
+        // Continue execution even if email fails
       }
 
       // Update local state
@@ -238,8 +205,8 @@ const ManageOrders: React.FC = () => {
         setViewingOrder(prev => prev ? { ...prev, status: newStatus } : null);
       }
 
-      // Refresh orders list
-      fetchOrders();
+      // Refresh the orders list
+      await fetchOrders();
     } catch (error) {
       console.error('Error updating order status:', error);
     } finally {
