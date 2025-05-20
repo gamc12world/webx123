@@ -38,21 +38,38 @@ const ProfilePage: React.FC = () => {
             if (itemsError) throw itemsError;
 
             // Get products for each order item
-            const items = itemsData.map(item => ({
-              product: {
-                id: item.product_id,
-                name: 'Product Name', // You would typically fetch this from your products table
-                price: item.price,
-                imageUrl: 'product-image-url', // You would typically fetch this from your products table
-              },
-              quantity: item.quantity,
-              size: item.size,
-              color: item.color,
-            }));
+            const itemsWithProducts = await Promise.all(
+              itemsData.map(async (item) => {
+                const { data: product, error: productError } = await supabase
+                  .from('products')
+                  .select('name, price, image_url')
+                  .eq('id', item.product_id)
+                  .maybeSingle(); // Use maybeSingle to handle not found
+
+                if (productError) {
+                  console.error('Error fetching product for order item:', productError);
+                  // Continue with fallback if product fetching fails
+                }
+
+                return {
+                  ...item,
+                  // Include the original item properties like quantity, size, color
+ quantity: item.quantity,
+ size: item.size,
+                  color: item.color,
+                  product: {
+                    id: item.product_id,
+                    name: product?.name || 'Unknown Product', // Fallback name
+                    price: product?.price || item.price, // Fallback price from order item
+                    imageUrl: product?.image_url || '', // Fallback image
+                  },
+                };
+ }),
+ );
 
             return {
               ...order,
-              items,
+ items: itemsWithProducts, // Assign the items with products to the order
               createdAt: new Date(order.created_at),
             };
           })
@@ -65,6 +82,21 @@ const ProfilePage: React.FC = () => {
         setLoading(false);
       }
     };
+    
+    // Set up real-time subscription for the current user's orders
+    const ordersSubscription = supabase
+      .channel(`user_orders_${user.id}`) // Use a unique channel name
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'orders',
+        filter: `user_id=eq.${user.id}`, // Filter by the current user's ID
+      }, () => {
+        console.log('Order change detected, refetching orders...');
+        fetchOrders(); // Re-fetch orders on change
+      })
+      .subscribe();
+
 
     fetchOrders();
   }, [user, navigate]);
