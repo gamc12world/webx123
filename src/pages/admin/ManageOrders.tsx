@@ -39,10 +39,17 @@ const ManageOrders: React.FC = () => {
             return { ...order, user: null };
           }
 
-          // Fetch order items
+          // Fetch order items with product details in a single query
           const { data: items, error: itemsError } = await supabase
             .from('order_items')
-            .select('*')
+            .select(`
+              id,
+              quantity,
+              size,
+              color,
+              price,
+              product_id
+            `)
             .eq('order_id', order.id);
 
           if (itemsError) {
@@ -50,39 +57,44 @@ const ManageOrders: React.FC = () => {
             return { ...order, user, items: [] };
           }
 
-          // Fetch product details for each item
-          const itemsWithProducts = await Promise.all(
-            items.map(async (item) => {
-              const { data: product, error: productError } = await supabase
-                .from('products')
-                .select('name, price, image_url')
-                .eq('id', item.product_id)
-                .maybeSingle();
+          // Fetch all products for these items in a single query
+          const productIds = items.map(item => item.product_id);
+          const { data: products, error: productsError } = await supabase
+            .from('products')
+            .select('id, name, price, image_url')
+            .in('id', productIds);
 
-              if (productError) {
-                console.error('Error fetching product:', productError);
-                return {
-                  ...item,
-                  product: {
-                    id: item.product_id,
-                    name: 'Unknown Product',
-                    price: item.price,
-                    imageUrl: '',
-                  },
-                };
+          if (productsError) {
+            console.error('Error fetching products:', productsError);
+            return { ...order, user, items: items.map(item => ({
+              ...item,
+              product: {
+                id: item.product_id,
+                name: 'Unknown Product',
+                price: item.price,
+                imageUrl: '',
               }
+            })) };
+          }
 
-              return {
-                ...item,
-                product: product ? {
-                  id: item.product_id,
-                  name: product.name,
-                  price: product.price,
-                  imageUrl: product.image_url,
-                } : { id: item.product_id, name: 'Unknown Product', price: item.price, imageUrl: '' },
-              };
-            })
-          );
+          // Map products to items
+          const itemsWithProducts = items.map(item => {
+            const product = products?.find(p => p.id === item.product_id);
+            return {
+              ...item,
+              product: product ? {
+                id: item.product_id,
+                name: product.name,
+                price: product.price,
+                imageUrl: product.image_url,
+              } : {
+                id: item.product_id,
+                name: 'Unknown Product',
+                price: item.price,
+                imageUrl: '',
+              }
+            };
+          });
 
           return {
             ...order,
@@ -180,35 +192,45 @@ const ManageOrders: React.FC = () => {
           .eq('id', orderId)
           .single();
 
+        // Fetch order items and products separately to avoid join issues
         const { data: itemsData } = await supabase
           .from('order_items')
-          .select(`
-            id,
-            quantity,
-            size,
-            color,
-            price,
-            product_id,
-            products (
-              name,
-              price,
-              image_url
-            )
-          `)
+          .select('id, quantity, size, color, price, product_id')
           .eq('order_id', orderId);
 
-        // Send email notification
-        await supabase.functions.invoke('send-order-email', {
-          body: {
-            email: userData.email,
-            orderNumber: orderId.slice(0, 8),
-            status: newStatus,
-            items: itemsData || [],
-            total: orderData?.total,
-            shippingAddress: orderData?.shipping_address,
-            customerName: userData.name
-          },
-        });
+        if (itemsData) {
+          const productIds = itemsData.map(item => item.product_id);
+          const { data: productsData } = await supabase
+            .from('products')
+            .select('id, name, price, image_url')
+            .in('id', productIds);
+
+          // Combine items with their product data
+          const itemsWithProducts = itemsData.map(item => {
+            const product = productsData?.find(p => p.id === item.product_id);
+            return {
+              ...item,
+              product: product || {
+                name: 'Unknown Product',
+                price: item.price,
+                image_url: ''
+              }
+            };
+          });
+
+          // Send email notification
+          await supabase.functions.invoke('send-order-email', {
+            body: {
+              email: userData.email,
+              orderNumber: orderId.slice(0, 8),
+              status: newStatus,
+              items: itemsWithProducts,
+              total: orderData?.total,
+              shippingAddress: orderData?.shipping_address,
+              customerName: userData.name
+            },
+          });
+        }
       }
 
       // Update local state
