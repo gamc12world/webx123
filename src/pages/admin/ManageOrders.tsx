@@ -57,7 +57,7 @@ const ManageOrders: React.FC = () => {
                 .from('products')
                 .select('name, price, image_url')
                 .eq('id', item.product_id)
- .maybeSingle();
+                .maybeSingle();
 
               if (productError) {
                 console.error('Error fetching product:', productError);
@@ -72,15 +72,15 @@ const ManageOrders: React.FC = () => {
                 };
               }
 
- return {
- ...item,
- product: product ? {
- id: item.product_id,
- name: product.name,
- price: product.price,
- imageUrl: product.image_url,
- } : { id: item.product_id, name: 'Unknown Product', price: item.price, imageUrl: '' },
- };
+              return {
+                ...item,
+                product: product ? {
+                  id: item.product_id,
+                  name: product.name,
+                  price: product.price,
+                  imageUrl: product.image_url,
+                } : { id: item.product_id, name: 'Unknown Product', price: item.price, imageUrl: '' },
+              };
             })
           );
 
@@ -157,76 +157,67 @@ const ManageOrders: React.FC = () => {
   const handleStatusChange = async (orderId: string, newStatus: string) => {
     setUpdating(orderId);
     try {
-      // Fetch the order details first
-      let emailError = null; // Declare emailError here
-
-      const { data: orderData, error: orderError } = await supabase
- .from('orders')
-        .select('*')
-        .eq('id', orderId)
-        .single();
-
-      if (orderError || !orderData) {
-        throw new Error('Order not found');
-      }
-
-      // Fetch the order items for this order
-      const { data: itemsData, error: itemsError } = await supabase
-        .from('order_items')
-        .select('*')
-        .eq('order_id', orderId);
-
-      if (itemsError) {
-        console.error('Error fetching order items for email:', itemsError);
-      }
-
-      // Fetch the user's email using the user_id from the order
-      const { data: userData, error: userError } = await supabase
- .from('users')
- .select('email')
- .eq('id', orderData.user_id)
- .single();
-
-      // Check if user data and email were found
-      if (userError || !userData || !userData.email) {
-        console.warn(`User or user email not found for order ${orderId}. Skipping email notification.`);
-      }
-      const userEmail = userData?.email; // Assign email if found, will be undefined if not
-      
-      // Update order status in database
-      const { error } = await supabase
+      // Update order status in database first
+      const { error: updateError } = await supabase
         .from('orders')
         .update({ status: newStatus })
         .eq('id', orderId);
 
-      if (error) throw error;
+      if (updateError) throw updateError;
 
-      // Send email notification only if user email was found
-      if (userEmail) {
-        // Note: This assumes the 'send-order-email' function is deployed and accessible
-        // and that the orderData fetched above includes the necessary details for the email
-        // If this function call fails, it will be logged but won't prevent the status update
-        const { error: emailError } = await supabase.functions.invoke('send-order-email', {
-          body: { // Use the fetched user email
-            email: userEmail, // Use the userEmail variable
-            orderNumber: orderData.id.slice(0, 8), // Add order number for email
+      // After successful update, fetch user email and order details for email notification
+      const { data: userData, error: userError } = await supabase
+        .from('users')
+        .select('email, name')
+        .eq('id', (orders.find(o => o.id === orderId))?.user_id)
+        .maybeSingle();
+
+      if (!userError && userData?.email) {
+        // Fetch order details for the email
+        const { data: orderData } = await supabase
+          .from('orders')
+          .select('id, total, shipping_address')
+          .eq('id', orderId)
+          .single();
+
+        const { data: itemsData } = await supabase
+          .from('order_items')
+          .select(`
+            id,
+            quantity,
+            size,
+            color,
+            price,
+            product_id,
+            products (
+              name,
+              price,
+              image_url
+            )
+          `)
+          .eq('order_id', orderId);
+
+        // Send email notification
+        await supabase.functions.invoke('send-order-email', {
+          body: {
+            email: userData.email,
+            orderNumber: orderId.slice(0, 8),
             status: newStatus,
-            items: itemsData || [], // Include the fetched items
-            total: orderData.total,
-            shippingAddress: orderData.shippingAddress,
+            items: itemsData || [],
+            total: orderData?.total,
+            shippingAddress: orderData?.shipping_address,
+            customerName: userData.name
           },
         });
       }
-      if (emailError) {
-        console.error('Error sending order status email:', emailError);
-      }
-      
-      // Re-fetch orders to update the UI
-      fetchOrders();
-      
+
+      // Update local state
       if (viewingOrder?.id === orderId) {
         setViewingOrder(prev => prev ? { ...prev, status: newStatus } : null);
       }
+
+      // Refresh orders list
+      fetchOrders();
     } catch (error) {
       console.error('Error updating order status:', error);
     } finally {
